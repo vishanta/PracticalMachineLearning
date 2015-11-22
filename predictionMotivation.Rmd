@@ -32,6 +32,7 @@ pml_testing <- read.csv("data/pml-testing.csv", na.strings=c("NA","#DIV/0!", "")
 ##Load library
 ```{r}
 library(caret)
+library(doParallel)
 ```
 
 ##Data structure
@@ -39,10 +40,7 @@ library(caret)
 dim(pml_training)
 dim(pml_testing)
 
-#str(pml_training)
-#str(pml_testing)
-
-table(pml_training$user_name) # summary(pml_training$user_name)
+table(pml_training$user_name)
 table(pml_training$classe)
 table(pml_training$classe, pml_training$user_name)
 ```
@@ -58,7 +56,7 @@ The preliminary study of the summary of the training set reveals more insight of
 Let's first check the columns with NA values before proceeding with cleaning the data.
 
 ```{r}
-summary(colSums(is.na(pml_training)) == 0) # table(colSums(is.na(pml_training)) == 0)
+summary(colSums(is.na(pml_training)) == 0)
 ```
 
 The result shows we have 100 columns with zero variability, which could be excluded in our prediction model.
@@ -66,19 +64,15 @@ The result shows we have 100 columns with zero variability, which could be exclu
 ```{r}
 # Remove the first 7 columns
 training.set <- pml_training[,-c(1:7)] ## 153 covariants
-#training.set <- pml_training[,8:ncol(pml_training)] # or dim(pml_training)[2]
 
 # Remove missing data
-NAs <- apply(training.set, 2, function(x) {sum(is.na(x))}) # colSums(is.na(training.set))
+NAs <- apply(training.set, 2, function(x) {sum(is.na(x))})
 training.set <- training.set[,which(NAs < nrow(training.set)*0.95)] ## 53 covariants
-#training.set <- training.set[,colSums(is.na(training.set)) == 0] # deletes columns with all NAs
 
 # Exclude near zero variance predictors
 table(nearZeroVar(training.set, saveMetrics = TRUE)$nzv) # FALSE=53, implies no nzv due to data cleaning
 nzv.columns <- nearZeroVar(training.set, saveMetrics = TRUE)
 training.set <- training.set[,nzv.columns$nzv == FALSE] # takes the 53 'FALSE' columns
-#nzv.columns <- nearZeroVar(training.set)
-#training.set <- training.set[, -nzv.columns] # gives empty set with 19622 rows
 
 # Convert classe into factor
 training.set$classe <- factor(training.set$classe)
@@ -91,7 +85,14 @@ names(training.set)
 ```
 
 ##Exploratory Data Analysis (EDA)
-Plots...
+```{r, fig.width=5, fig.height=4}
+plot(training.set$classe,
+     col="cyan",
+     main="Activity Summary in Training Set",
+     xlab="classe levels",
+     ylab="Frequency"
+)
+```
 
 ##Cross validation: Splitting data
 Split the dataset into 60% training and 40% validation set in order to perform cross validation. This is performed using random sampling without replacement.
@@ -105,42 +106,75 @@ validation <- training.set[-inTrain,]
 ##Fit a Model
 We will be using a couple of model and find out the one that provides high accuracy and low out of sample error. The Principal Component Analysis (PCA) can also be added as a preprocess option of the train function, but at the expense of losing accuracy. Hence, we will omit PCA model.
 
-- Three models are generated: random forest ("rf"), boosted trees ("gbm") and linear discriminant analysis ("lda") model.
-- Parallel computing methods are employed to improve efficiency.
-
 ```{r}
 # set a seed
 set.seed(6789)
 ```
 
-**Decision Tree**
-First, we start with decision tree model.
-
 **Random Forest**
-When I first ran the model with default train() function, it took over half an hour and I stopped the exeuction in the middle. The first thing to note is that by default {caret}train() uses bootstrap resampling which is very computationally intensive. Hence, I used optimization method using trControl parameter for tuning model training. So I switched to cross-validation with a low k=3, and played around with it to get a compromise between accuracy and speed. With this the model completed below 6 mins.
+When I first ran the Random Forest model with default train() function, it seemed to take hours to complete the run. I stopped the exeuction in the middle. The first thing to note is that by default {caret}train() uses "Resampling: Bootstraped" which is very computationally intensive.
+
+1. Hence, I used optimization method using trControl parameter for tuning model training. And switched to cross-validation (Resampling: Cross-Validated) with a low k=3, and played around with it to get a compromise between accuracy and speed. With this the model completed in approx 6 mins.
+
+2. In the next run, I used parallel computing for multi-core using registerDoParallel(). The 4-core CPU were fully utilized and it completed in less than 3 mins.
+
+**Tuning with cross validation**
+The model is tuned with cross validation resampling (Resampling: Cross-Validated) with 3 folds. Parallel computing method is also applied to improve efficiency.
 
 ```{r cache=TRUE}
+# parallel computing for multi-core
+registerDoParallel(makeCluster(detectCores()))
+
 # train a model - random forest (rf)
-#modelRF <- train(classe ~ ., data=training, method="rf", trControl = trainControl(method = "cv", number = 3))
-#modelRF
-#modelRF$finalModel
+modelRF <- train(classe ~ ., data=training, method="rf", trControl = trainControl(method = "cv", number = 3))
+modelRF
+modelRF$finalModel
 
 # prediction
-#predictions <- predict(modelRF, newdata=testing)
-#predictions
+predictions <- predict(modelRF, newdata = validation)
 
 # quick checks
-#table(testing$classe)
-#table(predictions)
+table(validation$classe)
+table(predictions)
 
 # confusion matrix
-#confusionMatrix(predictions, testing$classe) # Accuracy: %
+confusionMatrix(predictions, validation$classe)
 ```
 
-"Tune with cross validation" using 10 folds to avoid overfitting.
+Next, to improve the model and avoid over-fitting, the cross validation technique is applied with 10 folds. This took around 11m to execute.
+
+```{r cache=TRUE}
+registerDoParallel(makeCluster(detectCores()))
+modelRF10 <- train(classe ~ ., data=training, method="rf", trControl = trainControl(method = "cv", number = 10))
+predictions10 <- predict(modelRF10, newdata = validation)
+confusionMatrix(predictions10, validation$classe)
+```
 
 ##Accuracy and Out-of-Sample Error
-This is acheived through Confusion Matrix.
+With k=3, the cross validation accuracy is 99.40% and the out-of-sample error is 0.60%. This is a very good model.
+With k=10, the cross validation accuracy is 99.41%, therefore out-of-sample erro is 0.59. Hence, there is only a slight difference in the accuracy level.
+
+##Variables importance
+Following code snippet computes the importance of predictors and *roll_belt* is the most important covariant for the model trained with random forest and tuned with cross validation.
+
+```{r}
+varImp(modelRF$finalModel)
+```
+
+Let's visualize this in a plot.
+```{r, fig.width=5, fig.height=4}
+plot(varImp(modelRF), top = 20)
+```
+
+##Predicting 20 test cases
+```{r}
+predictions_test <- predict(modelRF, newdata = pml_testing)
+predictions_test
+```
 
 ##Conclusion
-Random Forest generates prediction with highest accuracy and lowest out of sample error compared to other models.
+Random Forest model gives prediction with highest accuracy and lowest out of sample error and when tuned with cross validation imporves efficiency. It provides better accuracy as compared to Decision Tree, Boosted Tree and Linear Discriminant Analysis models. Due to report size constraint, the other prediction models could not be performed. Few reasons to pick the model are:
+
+- Random forest is most suitable at handling a large number of inputs, especially when the interactions between variables are unknown.
+- Random forest’s built in cross-validation component that gives an unbiased estimate of the forest’s out-of-sample (or bag) (OOB) error rate.
+- Random forest can handle unscaled variables and categorical variables that makes it bit easy in the data cleaning process.
